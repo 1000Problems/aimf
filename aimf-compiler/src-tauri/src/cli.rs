@@ -3,7 +3,7 @@ use clap::Parser;
 use aimf_compiler::types::CompilerConfig;
 
 #[derive(Parser, Debug)]
-#[command(name = "aimf", about = "Compile a project into AIMF format")]
+#[command(name = "aimf", about = "Generate AIMF navigation manifests from project directories")]
 struct Args {
     /// Path to the project root directory
     #[arg(short, long, default_value = ".")]
@@ -17,21 +17,17 @@ struct Args {
     #[arg(short, long)]
     branch: Option<String>,
 
+    /// Path to Claude Code session logs directory (for enrichment)
+    #[arg(short, long)]
+    sessions: Option<String>,
+
     /// Output file (default: stdout)
     #[arg(short, long)]
     output: Option<String>,
 
-    /// Maximum number of hot files
-    #[arg(long, default_value = "15")]
-    max_hot: usize,
-
-    /// Maximum hot file size in bytes
-    #[arg(long, default_value = "2048")]
-    max_hot_size: u64,
-
-    /// Token budget for hot memory section
-    #[arg(long, default_value = "100000")]
-    token_budget: usize,
+    /// Include source directory entries
+    #[arg(long, default_value = "true")]
+    include_dirs: bool,
 }
 
 fn main() {
@@ -41,9 +37,8 @@ fn main() {
         root: PathBuf::from(&args.path),
         repo: args.repo,
         branch: args.branch,
-        max_hot_files: args.max_hot,
-        max_hot_file_size: args.max_hot_size,
-        token_budget: args.token_budget,
+        session_logs: args.sessions.map(PathBuf::from),
+        include_source_dirs: args.include_dirs,
         ..CompilerConfig::default()
     };
 
@@ -57,7 +52,7 @@ fn main() {
     match args.output {
         Some(path) => {
             std::fs::write(&path, &aimf).expect("Failed to write output file");
-            eprintln!("Wrote AIMF to {}", path);
+            eprintln!("Wrote AIMF manifest to {}", path);
         }
         None => {
             print!("{}", aimf);

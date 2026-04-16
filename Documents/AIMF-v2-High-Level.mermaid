@@ -1,0 +1,45 @@
+---
+title: AIMF v2 — High-Level Architecture
+---
+graph TB
+    subgraph Input["Project Folder"]
+        PROJECT["Local Working Directory<br/>(source, docs, diagrams, configs)"]
+    end
+
+    subgraph Compiler["aimf-compiler (Rust)"]
+        direction LR
+        SCAN["Scanner"] --> CLASS["Classifier"] --> CUR["Curator"] --> EMIT["Emitter"]
+    end
+
+    subgraph Manifest[".aimf Manifest (~100 tokens)"]
+        direction TB
+        NAV["@NAV — Resource Catalog<br/>(id | type | path | about | tokens | load)"]
+        CTX["@CTX — Project State<br/>(status, focus, next, token_budget)"]
+    end
+
+    subgraph Reader["aimf-reader Skill"]
+        direction TB
+        PARSE["Parse @NAV + @CTX"]
+        DECIDE["Decide what to load<br/>(Exploration / Design / Task)"]
+        FETCH["Fetch on demand<br/>(read from working folder)"]
+        PARSE --> DECIDE --> FETCH
+    end
+
+    subgraph LLM["LLM Context Window"]
+        direction TB
+        CACHED["Manifest (cached, ~100 tokens)"]
+        LOADED["On-demand resources<br/>(loaded per task, prompt-cached)"]
+    end
+
+    PROJECT --> SCAN
+    EMIT --> NAV
+    Manifest --> PARSE
+    DECIDE --> CACHED
+    FETCH --> LOADED
+    FETCH -.->|"reads files"| PROJECT
+
+    style Input fill:#f0f4f8,stroke:#2e5090,color:#1a1a2e
+    style Compiler fill:#e8f0fe,stroke:#2e5090,color:#1a1a2e
+    style Manifest fill:#f0fdf4,stroke:#2d8b4e,color:#1a1a2e
+    style Reader fill:#fff7ed,stroke:#ea580c,color:#1a1a2e
+    style LLM fill:#fce7f3,stroke:#be185d,color:#1a1a2e

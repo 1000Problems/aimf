@@ -1,129 +1,125 @@
 ---
 name: aimf-reader
-description: "Load and navigate AIMF (AI Minimal Format) project context documents. Use this skill whenever the user mentions AIMF, .aimf files, project context loading, says 'load project context', 'read the aimf', 'what resources are available', or wants to work with a codebase that has been compiled into AIMF format. Also trigger when you detect an .aimf file in the working directory, when the user asks to explore a project structure from an AIMF document, or says things like 'load group X', 'show me the hot memory', 'what files are in this project'. This skill is the bridge between compiled AIMF documents and your working context — it tells you what exists, what's already loaded, and how to fetch what you need on demand."
+description: "Load and navigate AIMF (AI Minimal Format) project context documents. Use this skill whenever you see .aimf files, the user mentions AIMF, project context loading, says 'load project context', 'read the aimf', 'design mode', 'what resources are available', or wants to work with a codebase described by an AIMF manifest. Also trigger when the user asks to explore project structure, load mermaid diagrams, check decision docs, or prepare a task for Sonnet. AIMF is the token-efficient navigation protocol that tells you what exists in a project without loading anything — you decide what to materialize based on the task."
 ---
 
-# AIMF Reader — Project Context Loader
+# AIMF Reader — Navigation Manifest Protocol
 
-This skill lets you read AIMF (AI Minimal Format) documents and intelligently load project resources into your working context. AIMF is a token-efficient format that catalogs an entire codebase with a small index and selective hot/cold content loading.
+AIMF is a lightweight manifest that tells you what project resources exist, what they mean, where to find them, and how much they cost in tokens to load. It is NOT a data format — it contains no file content. You read the manifest (~100 tokens), know everything that's available, and load resources from the working folder on demand.
 
-## What AIMF looks like
+## Document Format
 
-An AIMF document has this structure:
+An AIMF document has exactly two sections:
 
 ```
-@H          ← Header (metadata: version, resource count, root path)
-@G          ← Groups (optional: logical clusters like "api", "core", "test")
-@I          ← Index (one line per file: ID, type, load policy, path, size, hash, group, hint)
-@M KEY      ← Hot Memory entries (content already materialized — always in context)
-<<content>>
-@C ID       ← Cold Blocks (optional embedded content, not hot)
-<<content>>
+@NAV — what exists (resource catalog with descriptions and token costs)
+@CTX — where we are (project state, session notes, what's next)
 ```
 
-The key insight: the @H and @I sections are cheap (a few thousand tokens even for 500+ file projects), while @M contains only the most important content. Everything else is fetched from the working folder on demand.
+### @NAV entries
 
-## How to use this skill
+Each line: `id | type | path | about | tokens | load`
 
-### Step 1: Find and parse the AIMF file
+- **id**: Human-meaningful tag (ARCH, AUTH, D001 — not F1, F2)
+- **type**: MRM (mermaid), DEC (decision), DIR (directory), CFG (config), DOC (documentation), SPEC (specification), SRC (source), TASK (task)
+- **path**: Where to find it relative to project root
+- **about**: One-line description — enough to reason about the resource without loading it
+- **tokens**: Estimated token cost to load
+- **load**: When relevant — `design`, `task:X`, `task:*`, `reference`
 
-When this skill triggers, look for `.aimf` files in the working directory:
+### @CTX entries
+
+Plain key-value notes: `key: value` — status, last_session, focus, next, blockers, etc.
+
+## Operating Modes
+
+When the user loads AIMF, ALWAYS read @NAV and @CTX first (~100 tokens). Then operate based on the mode they specify:
+
+### Exploration Mode (default)
+
+You know everything that exists but load nothing. When the user asks about a specific area, load that one resource. It gets prompt-cached. As the conversation shifts focus, load additional resources incrementally.
+
+**Workflow:**
+1. Read @NAV and @CTX
+2. Tell the user what's available (summarize, don't dump the raw index)
+3. Wait for them to ask about something specific
+4. Load the relevant resource(s) from the working folder
+5. Continue — each loaded resource stays cached
+
+### Design Mode
+
+The user says "design mode" or "load everything for design." Load all resources tagged with `load: design` (typically all mermaid diagrams + decision docs + specs).
+
+**CRITICAL: Present a token budget BEFORE loading anything.**
+
+**Workflow:**
+1. Read @NAV and @CTX
+2. Filter for all entries with `design` in their load hints
+3. Sum their token costs and present a budget table:
+
+```
+Loading design context:
+
+  ARCH  AIMF-High-Level.mermaid         320 tokens
+  DETL  AIMF-Detailed.mermaid           780 tokens
+  SPEC  AIMF-v1-SPEC.md               2,400 tokens
+  D001  decisions/001-use-tauri.md       200 tokens
+                                   ────────────────
+  Total estimated:                     3,700 tokens
+
+Should I load all of these, or exclude any?
+```
+
+4. After user approves, load the approved resources
+5. All loaded resources get prompt-cached — you're ready to design across the whole system
+6. As the user drills into specific areas, load additional resources from @NAV on demand
+
+### Task Execution Mode (Sonnet)
+
+The document contains @NAV + @CTX + markdown task instructions (separated by `---`). Load everything in @NAV without asking — Opus already curated what's needed.
+
+**Workflow:**
+1. Read @NAV — load ALL listed resources from the working folder
+2. Read @CTX for background and constraints
+3. Read the markdown task section after `---`
+4. Execute the task with full context loaded
+
+## Loading Resources
+
+When you need to load a resource from @NAV:
+
+1. Read the **path** field — it's relative to the project root
+2. For **files** (MRM, DEC, CFG, DOC, SPEC, SRC): read the file directly
+3. For **directories** (DIR): list the directory contents, then read files as needed for the task
+4. For **TASK** type: read the task document (it may contain its own embedded AIMF)
+
+Resources are loaded from the working folder (the project directory). If a resource is missing, tell the user and continue with what's available.
+
+## Generating Tasks (Opus → Sonnet)
+
+When the user asks you to create a task for Sonnet:
+
+1. Determine which @NAV resources Sonnet will need for this task
+2. Create a new document with:
+   - @NAV section containing only the curated subset
+   - @CTX section briefing Sonnet on decisions, constraints, existing code
+   - `---` separator
+   - Markdown instructions: what to build, patterns to follow, tests to write
+3. Include a `<!-- Total resource cost: ~X tokens -->` comment after the separator
+4. Save as `TASK-<name>.task.md`
+
+The total token cost (resources + instructions) tells the user the execution cost before launching Sonnet.
+
+## Parsing
+
+To parse AIMF programmatically, use the bundled parser:
 
 ```bash
-find . -name "*.aimf" -maxdepth 2 | head -5
+python scripts/parse_aimf.py <file.aimf>           # Full JSON summary
+python scripts/parse_aimf.py <file.aimf> --nav      # Navigation entries
+python scripts/parse_aimf.py <file.aimf> --ctx      # Working context
+python scripts/parse_aimf.py <file.aimf> --budget design  # Token budget for a mode
+python scripts/parse_aimf.py <file.aimf> --search auth    # Search by id/path/about
 ```
 
-Then run the parser to get a structured overview:
-
-```bash
-python /path/to/this/skill/scripts/parse_aimf.py <file.aimf>
-```
-
-This outputs a JSON summary with the header, groups, resource counts by type, and the hot memory keys. If the parser script isn't available, you can parse the file directly — the format is simple enough to read with basic text tools.
-
-### Step 2: Load the hot memory
-
-The @M section is your starting context. Read it carefully — it contains:
-
-- **CTX** — current task context, what the user is focused on
-- **ARCH** — architecture summary of the project
-- **DEPS** — dependency overview
-- **F1, F2, ...** — content of the most important files (entry points, configs)
-
-This is your "working memory" for the project. Treat it as ground truth for orientation.
-
-### Step 3: Load resources on demand
-
-When you need a file that isn't in hot memory, use the index to find it:
-
-1. **Search the @I index** for the resource by path, type, or hint
-2. **Check the LoadWhen policy**:
-   - `always` — should already be in @M. If not, load it.
-   - `on_edit` — load when the user is editing this file
-   - `on_request` — load when you or the user asks for it
-   - `on_error` — load when an error references this file
-   - `on_group` — load when the entire group is requested
-   - `never` — reference only (binary assets), don't try to load
-3. **Read from the working folder** using the ROOT path from @H plus the relative path from @I:
-   ```
-   ROOT + "/" + resource_path
-   ```
-4. **Check for cold blocks** (@C) first — if the content is embedded, use it instead of hitting the filesystem.
-
-### Step 4: Group-based loading
-
-For large projects, AIMF organizes files into groups (G1, G2, ...). When the user says something like "I need to work on the API layer" or "show me the tests", load the entire group:
-
-1. Find the group ID from @G (e.g., G2|api|src/api/**)
-2. Filter @I for all resources with that group ID
-3. Load the ones that fit in your context budget (prioritize by LoadWhen, then by size ascending)
-
-### Step 5: Sharded projects
-
-If the @H section contains a `SHARD` field (e.g., `SHARD:1/3`), the project is split across multiple files:
-
-- **Spine shard** (`project.aimf`): always load this first — it has the full index
-- **Group shards** (`project.G1.aimf`, `project.G2.aimf`): load on demand when a group is needed
-
-## Resource types
-
-| Type  | Meaning | Typical LoadWhen |
-|-------|---------|-----------------|
-| SRC   | Source code | on_request, on_edit for entry points |
-| CFG   | Configuration (toml, yaml, json) | always for small ones |
-| DOC   | Documentation (md, rst, txt) | always for README, on_request otherwise |
-| TEST  | Test files | on_request |
-| MRM   | Mermaid diagrams | on_request |
-| BIN   | Binary assets (images, etc.) | never |
-| META  | CI configs, gitignore, etc. | on_group |
-| OTHER | Everything else | on_request |
-
-## Token budget awareness
-
-Be mindful of how much context you're consuming. The AIMF index itself is very cheap (~10 tokens per resource line), but loading file contents adds up fast. General guidelines:
-
-- The spine (@H + @G + @I + @M) for a 500-file project is ~7K-25K tokens
-- Loading a group of 50 source files could be 50K-200K tokens
-- Always prefer loading summaries/signatures over full files for initial orientation
-- Load full content only when you need to read or edit specific code
-
-## Workflow integration
-
-When working on a task with AIMF context:
-
-1. **Orient**: Read @M for architecture and current focus
-2. **Navigate**: Use @I to find relevant files by type, group, or hint
-3. **Load**: Fetch specific files from the working folder as needed
-4. **Track**: If the user changes focus (new file, new task), mentally update CTX
-
-## Example: user says "help me refactor the auth module"
-
-1. Read @M ARCH to understand project structure
-2. Search @I for resources with hints containing "auth" or paths containing "auth"
-3. Load the matching files from the working folder
-4. Also load any test files (type TEST) related to auth
-5. Now you have full context to help with the refactor
-
-## Parsing reference
-
-For the full AIMF v1 specification (grammar, field definitions, sharding rules), read `references/AIMF-v1-SPEC.md` in this skill's directory.
+But the format is simple enough to read directly — it's just pipe-delimited text.

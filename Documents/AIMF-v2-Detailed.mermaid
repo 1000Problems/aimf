@@ -1,0 +1,149 @@
+---
+title: AIMF v2 — Detailed Architecture
+---
+graph TB
+    %% ─── ENTRY POINTS ───
+    subgraph EntryPoints["Entry Points"]
+        direction LR
+        CLI["CLI (clap)<br/>--path --repo --branch<br/>--sessions --output --include-dirs"]
+        TAURI["Tauri Desktop<br/>compile_project()<br/>save_aimf()"]
+    end
+
+    %% ─── CONFIG ───
+    CONFIG["CompilerConfig<br/>(root, repo, branch, session_logs,<br/>ignore_patterns, include_source_dirs, max_about_len)"]
+
+    %% ─── PUBLIC API ───
+    subgraph API["Public API (lib.rs)"]
+        direction LR
+        FN1["compile() → String"]
+        FN2["compile_to_doc() → AimfDocument"]
+        FN3["generate_task() → String"]
+    end
+
+    %% ─── SCANNER ───
+    subgraph Stage1["Scanner"]
+        direction TB
+        S1["walkdir traversal"]
+        S2["Ignore filter<br/>(.git, node_modules, target,<br/>__pycache__, dist, build)"]
+        S3["Kind detection<br/>(Mermaid, Decision, Config, Doc,<br/>Spec, SourceDir, SourceFile, Task)"]
+        S4["Priority sort<br/>MRM → SPEC → DEC → DOC<br/>→ CFG → DIR → SRC → TASK"]
+        S1 --> S2 --> S3 --> S4
+    end
+
+    SOUT["Vec&lt;Discovered&gt;<br/>(path, kind, size_bytes, is_dir)"]
+
+    %% ─── SESSION MINER ───
+    subgraph Miner["Session Miner (optional)"]
+        direction TB
+        M1["Read .jsonl session logs"]
+        M2["Regex: extract mermaid blocks<br/>+ surrounding file paths"]
+        M3["Build enrichment map"]
+        M1 --> M2 --> M3
+    end
+
+    MENRICH["HashMap&lt;path, description&gt;"]
+
+    %% ─── CURATOR ───
+    subgraph Stage3["Curator"]
+        direction TB
+        CU1["Classify each Discovered<br/>(type mapping, ID generation,<br/>description heuristics, load hints)"]
+        CU2["Session enrichment<br/>(override about if richer)"]
+        CU3["Unique ID dedup<br/>(ARCH, ARCH2, ARCH3 ...)"]
+        CU4["Token estimation<br/>(bytes / 4 heuristic)"]
+        CU5["Generate @CTX defaults<br/>(status, compiled, token_budget,<br/>repo, focus, next)"]
+        CU1 --> CU2 --> CU3 --> CU4 --> CU5
+    end
+
+    COUT["AimfDocument<br/>(Vec&lt;NavEntry&gt;, Vec&lt;CtxEntry&gt;)"]
+
+    %% ─── EMITTER ───
+    subgraph Stage4["Emitter"]
+        direction TB
+        E1["emit()<br/>@NAV + @CTX string<br/>(column-aligned, priority-sorted)"]
+        E2["emit_task()<br/>@NAV + @CTX + ---<br/>+ task markdown<br/>(Opus → Sonnet handoff)"]
+    end
+
+    %% ─── OUTPUT ───
+    subgraph Output[".aimf Manifest"]
+        direction TB
+        NAV["@NAV<br/>id | type | path | about | tokens | load"]
+        CTX["@CTX<br/>status, compiled, token_budget,<br/>repo, focus, next"]
+    end
+
+    %% ─── READER ───
+    subgraph ReaderSkill["aimf-reader Skill (Python)"]
+        direction TB
+
+        subgraph Parser["parse_aimf.py"]
+            direction LR
+            P1["--nav"]
+            P2["--ctx"]
+            P3["--budget"]
+            P4["--search"]
+            P5["--load"]
+        end
+
+        subgraph Modes["Operating Modes"]
+            direction TB
+            MODE1["Exploration<br/>Load nothing upfront.<br/>Fetch on demand."]
+            MODE2["Design<br/>Load all design-tagged.<br/>Token budget first."]
+            MODE3["Task Execution<br/>Load everything in @NAV.<br/>Follow markdown instructions."]
+        end
+    end
+
+    %% ─── LLM CONTEXT ───
+    subgraph LLMCtx["LLM Context Window"]
+        direction TB
+        TINY["Manifest (~100 tokens)<br/>(prompt-cached, always present)"]
+        DEMAND["On-demand resources<br/>(loaded from working folder,<br/>prompt-cached after first load)"]
+    end
+
+    %% ─── WORKING FOLDER ───
+    FOLDER["Working Folder<br/>(source of truth — files never embedded)"]
+
+    %% ─── CONNECTIONS ───
+    CLI --> CONFIG
+    TAURI --> CONFIG
+    CONFIG --> API
+    API --> Stage1
+
+    Stage1 --> SOUT
+    SOUT --> Stage3
+
+    CONFIG -.->|"session_logs"| Miner
+    Miner --> MENRICH
+    MENRICH --> Stage3
+
+    Stage3 --> COUT
+    COUT --> Stage4
+
+    Stage4 --> Output
+
+    Output --> Parser
+    Parser --> Modes
+
+    MODE1 --> TINY
+    MODE2 --> TINY
+    MODE2 --> DEMAND
+    MODE3 --> DEMAND
+
+    Modes -.->|"reads files on demand"| FOLDER
+    FOLDER -.->|"resources loaded into"| DEMAND
+
+    %% ─── STYLES ───
+    style EntryPoints fill:#ede9fe,stroke:#7c3aed,color:#1a1a2e
+    style API fill:#ede9fe,stroke:#7c3aed,color:#1a1a2e
+    style Stage1 fill:#dbeafe,stroke:#3b82f6,color:#1a1a2e
+    style Stage3 fill:#dbeafe,stroke:#3b82f6,color:#1a1a2e
+    style Stage4 fill:#dbeafe,stroke:#3b82f6,color:#1a1a2e
+    style Miner fill:#fef3c7,stroke:#d97706,color:#1a1a2e
+    style Output fill:#f0fdf4,stroke:#2d8b4e,color:#1a1a2e
+    style ReaderSkill fill:#fff7ed,stroke:#ea580c,color:#1a1a2e
+    style Parser fill:#ffedd5,stroke:#f97316,color:#1a1a2e
+    style Modes fill:#ffedd5,stroke:#f97316,color:#1a1a2e
+    style LLMCtx fill:#fce7f3,stroke:#be185d,color:#1a1a2e
+    style CONFIG fill:#f5f5f4,stroke:#78716c,color:#1a1a2e
+    style SOUT fill:#e0f2fe,stroke:#0284c7,color:#1a1a2e
+    style MENRICH fill:#fef9c3,stroke:#ca8a04,color:#1a1a2e
+    style COUT fill:#e0f2fe,stroke:#0284c7,color:#1a1a2e
+    style FOLDER fill:#f0f4f8,stroke:#2e5090,color:#1a1a2e

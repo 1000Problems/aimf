@@ -1,47 +1,52 @@
 pub mod types;
 pub mod scanner;
 pub mod classifier;
-pub mod partitioner;
-pub mod hot_strategy;
+pub mod curator;
 pub mod emitter;
+pub mod session_miner;
 
-use types::CompilerConfig;
-use scanner::scan;
-use partitioner::partition;
-use emitter::emit;
+use std::collections::HashMap;
+use types::{AimfDocument, CompilerConfig};
 
-/// Run the full AIMF compilation pipeline.
+/// Run the AIMF v2 compilation pipeline.
+///
+/// Scans a project directory, discovers meaningful resources,
+/// classifies them, and emits a lightweight navigation manifest.
 pub fn compile(config: &CompilerConfig) -> String {
-    // Stage 1: Scan
-    let files = scan(config);
-
-    // Stage 2+3: Classify + Partition (combined)
-    let partition_result = partition(&files, config);
-
-    // Stage 4: Emit
-    emit(config, &files, &partition_result)
+    let doc = compile_to_doc(config);
+    emitter::emit(&doc)
 }
 
-/// Compile and return structured metadata (for Tauri UI).
-pub fn compile_with_stats(config: &CompilerConfig) -> CompileResult {
-    let files = scan(config);
-    let partition_result = partition(&files, config);
-    let aimf = emit(config, &files, &partition_result);
+/// Compile and return the structured document (for Tauri UI or programmatic use).
+pub fn compile_to_doc(config: &CompilerConfig) -> AimfDocument {
+    // Stage 1: Scan for meaningful resources
+    let discovered = scanner::scan(config);
 
-    CompileResult {
-        aimf,
-        total_files: partition_result.resources.len(),
-        hot_count: partition_result.hot_ids.len(),
-        group_count: partition_result.groups.len(),
-        estimated_tokens: 0, // TODO: implement token estimation
-    }
+    // Stage 2: Mine session logs for enrichment (optional)
+    let enrichments = match &config.session_logs {
+        Some(session_dir) => session_miner::mine_sessions(session_dir),
+        None => HashMap::new(),
+    };
+
+    // Stage 3: Curate — classify, describe, assign IDs, estimate tokens
+    let (nav, ctx) = curator::curate(&discovered, config, &enrichments);
+
+    AimfDocument { nav, ctx }
 }
 
-#[derive(serde::Serialize)]
-pub struct CompileResult {
-    pub aimf: String,
-    pub total_files: usize,
-    pub hot_count: usize,
-    pub group_count: usize,
-    pub estimated_tokens: usize,
+/// Generate a task handoff document for Sonnet.
+pub fn generate_task(
+    config: &CompilerConfig,
+    task_title: &str,
+    task_body: &str,
+    resource_ids: &[String], // Which @NAV entries to include
+) -> String {
+    let doc = compile_to_doc(config);
+
+    // Filter nav to only requested resources
+    let filtered_nav: Vec<_> = doc.nav.into_iter()
+        .filter(|n| resource_ids.contains(&n.id) || resource_ids.iter().any(|r| r == "*"))
+        .collect();
+
+    emitter::emit_task(&filtered_nav, &doc.ctx, task_title, task_body)
 }

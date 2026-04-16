@@ -1,202 +1,106 @@
 use std::fmt::Write;
 
-use crate::types::*;
-use crate::partitioner::PartitionResult;
-use crate::hot_strategy;
-use crate::scanner::ScannedFile;
+use crate::types::{AimfDocument, NavEntry, CtxEntry};
 
-/// Emit a complete AIMF document as a string.
-pub fn emit(
-    config: &CompilerConfig,
-    files: &[ScannedFile],
-    partition: &PartitionResult,
-) -> String {
-    let mut out = String::with_capacity(64 * 1024);
+/// Emit a complete AIMF v2 document as a string.
+pub fn emit(doc: &AimfDocument) -> String {
+    let mut out = String::with_capacity(4096);
 
-    emit_header(&mut out, config, &partition);
-    emit_groups(&mut out, &partition.groups);
-    emit_index(&mut out, &partition.resources);
-    emit_hot_memory(&mut out, config, files, &partition);
+    emit_nav(&mut out, &doc.nav);
+    emit_ctx(&mut out, &doc.ctx);
 
     out
 }
 
-/// Emit the @H header section.
-fn emit_header(out: &mut String, config: &CompilerConfig, partition: &PartitionResult) {
-    let _ = writeln!(out, "@H");
-    let _ = writeln!(out, "V:1");
-    let _ = writeln!(out, "R:{}", partition.resources.len());
-    let _ = writeln!(out, "HOT:{}", partition.hot_ids.len());
+/// Emit the @NAV section.
+fn emit_nav(out: &mut String, nav: &[NavEntry]) {
+    let _ = writeln!(out, "@NAV");
 
-    if !partition.groups.is_empty() {
-        let _ = writeln!(out, "GRP:{}", partition.groups.len());
-    }
-
-    if let Some(ref repo) = config.repo {
-        let _ = writeln!(out, "REPO:{}", repo);
-    }
-    if let Some(ref branch) = config.branch {
-        let _ = writeln!(out, "BRANCH:{}", branch);
-    }
-
-    // Timestamp
-    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    let _ = writeln!(out, "TS:{}", ts);
-    let _ = writeln!(out, "ROOT:{}", config.root.display());
-
-    // Sharding marker
-    if partition.resources.len() > config.shard_threshold {
-        let _ = writeln!(out, "SHARD:1/1");
-    }
-
-    let _ = writeln!(out);
-}
-
-/// Emit the @G groups section.
-fn emit_groups(out: &mut String, groups: &[Group]) {
-    if groups.is_empty() {
+    if nav.is_empty() {
+        let _ = writeln!(out);
         return;
     }
 
-    let _ = writeln!(out, "@G");
-    for group in groups {
-        let patterns = group.patterns.join(",");
-        let _ = writeln!(out, "{}|{}|{}", group.id, group.label, patterns);
-    }
-    let _ = writeln!(out);
-}
+    // Calculate column widths for alignment
+    let id_w = nav.iter().map(|n| n.id.len()).max().unwrap_or(4).max(4);
+    let type_w = 4; // "SPEC" is longest at 4
+    let path_w = nav.iter().map(|n| n.path.to_string_lossy().len()).max().unwrap_or(4).max(4);
+    let about_w = nav.iter().map(|n| n.about.len()).max().unwrap_or(5).max(5);
+    let tok_w = nav.iter().map(|n| format!("{}", n.tokens).len()).max().unwrap_or(6).max(6);
 
-/// Emit the @I index section.
-fn emit_index(out: &mut String, resources: &[Resource]) {
-    let _ = writeln!(out, "@I");
-    for r in resources {
+    // Header line
+    let _ = writeln!(
+        out,
+        "{:<id_w$} | {:<type_w$} | {:<path_w$} | {:<about_w$} | {:>tok_w$} | load",
+        "id", "type", "path", "about", "tokens",
+        id_w = id_w, type_w = type_w, path_w = path_w, about_w = about_w, tok_w = tok_w,
+    );
+
+    // Data lines
+    for entry in nav {
+        let path_str = entry.path.to_string_lossy();
+        // Append / for DIR entries if not already there
+        let display_path = if entry.resource_type == crate::types::ResourceType::DIR
+            && !path_str.ends_with('/')
+        {
+            format!("{}/", path_str)
+        } else {
+            path_str.to_string()
+        };
+
+        let hints = entry.load_hints.join(", ");
+
         let _ = writeln!(
             out,
-            "{}|{}|{}|{}|{}|{}|{}|{}",
-            r.id,
-            r.resource_type.as_str(),
-            r.load_when.as_str(),
-            r.path.display(),
-            r.size,
-            r.hash,
-            r.group_id,
-            r.hint,
+            "{:<id_w$} | {:<type_w$} | {:<path_w$} | {:<about_w$} | {:>tok_w$} | {}",
+            entry.id,
+            entry.resource_type.as_str(),
+            display_path,
+            entry.about,
+            entry.tokens,
+            hints,
+            id_w = id_w, type_w = type_w, path_w = path_w, about_w = about_w, tok_w = tok_w,
         );
     }
+
     let _ = writeln!(out);
 }
 
-/// Emit the @M hot memory section.
-fn emit_hot_memory(
-    out: &mut String,
-    config: &CompilerConfig,
-    files: &[ScannedFile],
-    partition: &PartitionResult,
-) {
-    // Emit CTX entry
-    let _ = writeln!(out, "@M CTX");
-    let _ = writeln!(out, "<<task=initial compilation;focus=all>>");
-    let _ = writeln!(out);
+/// Emit the @CTX section.
+fn emit_ctx(out: &mut String, ctx: &[CtxEntry]) {
+    let _ = writeln!(out, "@CTX");
 
-    // Emit ARCH summary
-    let _ = writeln!(out, "@M ARCH");
-    let _ = write!(out, "<<");
-    emit_architecture_summary(out, partition);
-    let _ = writeln!(out, ">>");
-    let _ = writeln!(out);
-
-    // Emit DEPS summary
-    let _ = writeln!(out, "@M DEPS");
-    let _ = write!(out, "<<");
-    emit_deps_summary(out, partition, files, config);
-    let _ = writeln!(out, ">>");
-    let _ = writeln!(out);
-
-    // Emit hot file entries
-    for (hot_id, strategy) in &partition.hot_strategies {
-        // Find the corresponding scanned file
-        let resource = partition.resources.iter().find(|r| &r.id == hot_id);
-        if let Some(resource) = resource {
-            let scanned = files.iter().find(|f| f.path == resource.path);
-            if let Some(scanned) = scanned {
-                let payload = hot_strategy::apply_strategy(&scanned.abs_path, strategy);
-                let _ = writeln!(out, "@M {}", hot_id);
-                let _ = writeln!(out, "<<{}>>\n", payload);
-            }
-        }
+    for entry in ctx {
+        let _ = writeln!(out, "{}: {}", entry.key, entry.value);
     }
 }
 
-/// Generate a simple architecture summary from the resource structure.
-fn emit_architecture_summary(out: &mut String, partition: &PartitionResult) {
-    let _ = write!(out, "Project structure: {} resources in {} groups.\n",
-        partition.resources.len(), partition.groups.len());
+/// Emit a task handoff document: AIMF header + markdown instructions.
+pub fn emit_task(
+    nav: &[NavEntry],
+    ctx: &[CtxEntry],
+    task_title: &str,
+    task_body: &str,
+) -> String {
+    let mut out = String::with_capacity(8192);
 
-    // Count by type
-    let mut type_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for r in &partition.resources {
-        *type_counts.entry(r.resource_type.as_str()).or_insert(0) += 1;
-    }
+    // AIMF sections
+    let doc = AimfDocument {
+        nav: nav.to_vec(),
+        ctx: ctx.to_vec(),
+    };
+    out.push_str(&emit(&doc));
 
-    let _ = write!(out, "Composition: ");
-    let counts: Vec<String> = type_counts.iter()
-        .map(|(k, v)| format!("{} {}", v, k))
-        .collect();
-    let _ = write!(out, "{}.\n", counts.join(", "));
+    // Token budget summary
+    let total: usize = nav.iter().map(|n| n.tokens).sum();
+    let _ = writeln!(out, "---");
+    let _ = writeln!(out, "<!-- Total resource cost: ~{} tokens -->", total);
+    let _ = writeln!(out);
 
-    // List groups with resource counts
-    for group in &partition.groups {
-        let count = partition.resources.iter()
-            .filter(|r| r.group_id == group.id)
-            .count();
-        if count > 0 {
-            let _ = write!(out, "{} ({}): {} files.\n", group.label, group.id, count);
-        }
-    }
+    // Task markdown
+    let _ = writeln!(out, "# Task: {}", task_title);
+    let _ = writeln!(out);
+    out.push_str(task_body);
 
-    // List entry points
-    let entries: Vec<&Resource> = partition.resources.iter()
-        .filter(|r| matches!(r.load_when, LoadWhen::Always | LoadWhen::OnEdit))
-        .collect();
-    if !entries.is_empty() {
-        let _ = write!(out, "Entry points: ");
-        let names: Vec<String> = entries.iter()
-            .map(|r| format!("{} ({})", r.path.display(), r.id))
-            .collect();
-        let _ = write!(out, "{}.", names.join(", "));
-    }
-}
-
-/// Generate a dependency summary from config files.
-fn emit_deps_summary(
-    out: &mut String,
-    partition: &PartitionResult,
-    files: &[ScannedFile],
-    config: &CompilerConfig,
-) {
-    // Look for common dependency files
-    let dep_files = ["Cargo.toml", "package.json", "requirements.txt", "go.mod", "Gemfile", "pyproject.toml"];
-
-    for dep_file in &dep_files {
-        let resource = partition.resources.iter().find(|r| {
-            r.path.file_name()
-                .map(|f| f.to_string_lossy().to_lowercase() == dep_file.to_lowercase())
-                .unwrap_or(false)
-        });
-
-        if let Some(resource) = resource {
-            let scanned = files.iter().find(|f| f.path == resource.path);
-            if let Some(scanned) = scanned {
-                if let Ok(content) = std::fs::read_to_string(&scanned.abs_path) {
-                    // For now, include the first 20 lines of dependency files
-                    let lines: Vec<&str> = content.lines().take(20).collect();
-                    let _ = write!(out, "[{}]\n{}\n", dep_file, lines.join("\n"));
-                }
-            }
-        }
-    }
-
-    if out.ends_with("<<") {
-        let _ = write!(out, "no dependency files detected");
-    }
+    out
 }

@@ -4,11 +4,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-AIMF (AI Minimal Format) is a token-efficient project context format — a compiler pipeline that converts a local codebase into a single `.aimf` document optimized for LLM ingestion. It addresses the problem that JSON/YAML/XML are wasteful when fed into AI context windows. The output format is ASCII, index-first, and lazy-loading by design.
+AIMF (AI Minimal Format) is a **navigation manifest** — a lightweight document (~40–80 lines) that tells an LLM what project resources exist, where to find them, how much they cost in tokens, and when to load them. It does NOT embed file content. Resources are loaded on demand from the working folder.
 
 The repo has two components:
-- **`aimf-compiler/`** — Rust/Tauri app (pipeline core + desktop GUI + CLI binary)
+- **`aimf-compiler/`** — Rust CLI (with optional Tauri desktop GUI) that scans a project and generates an `.aimf` manifest
 - **`aimf-reader/`** — Python parser + Cowork skill for consuming `.aimf` documents
+
+## Core Concept
+
+AIMF solves the problem of getting project context into an LLM without wasting tokens on JSON/YAML overhead or loading everything upfront. The manifest is ~100 tokens. You read it, know the whole project, and load specific resources on demand — each one gets prompt-cached and stays warm across turns.
+
+Three scenarios define AIMF's purpose:
+1. **Exploration** — Load AIMF (~100 tokens), know the whole project, fetch individual resources on demand
+2. **Design Mode** — Load all mermaid diagrams + decision docs into prompt cache (~3,500 tokens), design across the full system
+3. **Task Handoff** — Opus creates a task document with curated AIMF header + markdown instructions → Sonnet reads it, loads resources, follows instructions
+
+## AIMF Format (v2)
+
+An AIMF document has exactly two sections:
+
+```
+@NAV — what exists (resource catalog with descriptions and token costs)
+@CTX — where we are (project state, session notes, what's next)
+```
+
+**@NAV entries** (pipe-delimited): `id | type | path | about | tokens | load`
+- **type**: MRM (mermaid), DEC (decision), DIR (directory), CFG (config), DOC (documentation), SPEC (specification), SRC (source), TASK (task)
+- **load hints**: `design`, `task:X`, `task:*`, `reference`
+- **tokens**: estimated cost via `bytes / 4` heuristic
+
+**@CTX entries** (key-value): status, last_session, focus, next, blockers, token_budget, notes
+
+**Task documents** add a `---` separator followed by markdown instructions (Opus → Sonnet handoff).
 
 ## Build Commands
 
@@ -27,8 +54,8 @@ cargo build --features tauri
 # Run the CLI (compile a project)
 cargo run --features cli -- --path /path/to/project --repo owner/repo --branch main
 
-# Run with all options
-cargo run --features cli -- --path . --output project.aimf --max_hot 20 --max_hot_size 4096
+# Run with session log mining
+cargo run --features cli -- --path . --output project.aimf --sessions ~/.claude/projects/myproject/
 
 # Check without building
 cargo check
@@ -40,12 +67,12 @@ No test suite exists yet. There is no Makefile.
 **Python reader** requires no dependencies (stdlib only):
 
 ```bash
-python aimf-reader/scripts/parse_aimf.py project.aimf
-python aimf-reader/scripts/parse_aimf.py project.aimf --index
-python aimf-reader/scripts/parse_aimf.py project.aimf --hot
-python aimf-reader/scripts/parse_aimf.py project.aimf --load F3
-python aimf-reader/scripts/parse_aimf.py project.aimf --search auth
-python aimf-reader/scripts/parse_aimf.py project.aimf --stats
+python aimf-reader/scripts/parse_aimf.py project.aimf           # Full JSON summary
+python aimf-reader/scripts/parse_aimf.py project.aimf --nav      # Navigation entries
+python aimf-reader/scripts/parse_aimf.py project.aimf --ctx      # Working context
+python aimf-reader/scripts/parse_aimf.py project.aimf --budget design  # Token budget for a mode
+python aimf-reader/scripts/parse_aimf.py project.aimf --search auth    # Search by id/path/about
+python aimf-reader/scripts/parse_aimf.py project.aimf --load ARCH      # Load resource by ID
 ```
 
 ## Architecture: 4-Stage Pipeline
@@ -53,59 +80,64 @@ python aimf-reader/scripts/parse_aimf.py project.aimf --stats
 The compiler is orchestrated in `lib.rs` and flows through four stages:
 
 ```
-local project → Scanner → Classifier → Partitioner → Emitter → .aimf file
+local project → Scanner → Classifier → Curator → Emitter → .aimf manifest
 ```
 
-1. **Scanner** (`scanner/mod.rs`) — Walks the directory tree, computes SHA-256 (8-char truncated), ignores `.git`, `node_modules`, `target`, `__pycache__`, lock files, `dist`, `build`.
+1. **Scanner** (`scanner/mod.rs`) — Discovers meaningful resources (not every file). Looks for: mermaid files, decision docs, specs, key configs, READMEs, source directories. Tracks source directories as logical units (e.g., `src/api/`) not individual files.
 
-2. **Classifier** (`classifier/mod.rs`) — Maps extensions to `ResourceType` (SRC, CFG, DOC, TEST, MRM, BIN, META, OTHER). Detects entry points (main.rs, lib.rs, index.ts, app.py, etc.). Generates semantic hints (≤60 chars).
+2. **Classifier** (`classifier/mod.rs`) — Generates descriptions by reading file content heuristically (no AI). Extracts mermaid diagram types, markdown headings, config names. Assigns meaningful IDs (ARCH, D001, API — not F1, F2). Sets default load hints per resource type.
 
-3. **Partitioner** (`partitioner/mod.rs`) — Assigns files to glob-matched groups, sets `LoadWhen` policy (always / on_edit / on_request / on_error / on_group / never), scores files for hot candidacy, selects hot payload strategy (Full / Head(N) / Signature / Summary / Delta). Triggers sharding if resource count exceeds threshold (default 500).
+3. **Curator** (`curator/mod.rs`) — Takes discovered resources + optional session enrichments → `(Vec<NavEntry>, Vec<CtxEntry>)`. Generates unique IDs, estimates tokens via `bytes / 4`, auto-generates @CTX fields (status, compiled date, token budget).
 
-4. **Emitter** (`emitter/mod.rs`) — Writes the 5-section AIMF document:
-   - `@H` — Header (version, counts, repo/branch/commit, timestamp, root path, shard info)
-   - `@G` — Groups (logical clusters with glob patterns)
-   - `@I` — Index (one line per resource: `ID|Type|LoadWhen|Path|Size|Hash|Group|Hint`)
-   - `@M` — Hot Memory (materialized content + special keys: CTX, ARCH, DEPS, ERR, DELTA)
-   - `@C` — Cold Blocks (embedded content for self-contained docs)
+4. **Emitter** (`emitter/mod.rs`) — Writes the two-section AIMF document (@NAV with aligned columns, @CTX with key-value pairs). Also supports `emit_task()` for generating Opus → Sonnet handoff documents.
+
+Optional: **Session Miner** (`session_miner/mod.rs`) — Parses Claude Code `.jsonl` session logs to enrich resource descriptions. Extracts mermaid context and file path references using regex (no AI, no token consumption).
 
 ## Key Types (`types.rs`)
 
-- `Resource` — path, size, hash, type, group, hint, load_when, entry_point flag
-- `Group` — id, name, glob patterns
-- `HotEntry` — resource ID, strategy, materialized content
-- `CompilerConfig` — all tunable parameters (max_hot_files, max_hot_file_size, summary_threshold, token_budget, shard_threshold, ignore_patterns)
-- `LoadWhen` — enum: Always, OnEdit, OnRequest, OnError, OnGroup, Never
-- `HotStrategy` — enum: Full, Summary, Head(usize), Signature, Delta
+- `ResourceType` — enum: MRM, DEC, DIR, CFG, DOC, SPEC, SRC, TASK
+- `NavEntry` — id, resource_type, path, about, tokens, load_hints
+- `CtxEntry` — key, value
+- `AimfDocument` — nav: Vec<NavEntry>, ctx: Vec<CtxEntry>
+- `CompilerConfig` — root, repo, branch, session_logs, ignore_patterns, include_source_dirs, max_about_len
 
-## Hot Memory Special Keys
+## Public API (`lib.rs`)
 
-Beyond file content, `@M` embeds synthetic keys:
-- `CTX` — current task context (focus group, cursor position)
-- `ARCH` — architecture summary (group descriptions, file composition counts)
-- `DEPS` — dependency overview
-- `ERR` — build error context (populated on failure)
-- `DELTA` — git diff since last compile
+- `compile(config) → String` — full pipeline, returns AIMF text
+- `compile_to_doc(config) → AimfDocument` — returns structured document
+- `generate_task(doc, task_nav_ids, task_ctx, task_markdown) → String` — creates task handoff document
 
-## Sharding (500+ files)
+## CLI (`cli.rs`)
 
-When the project exceeds `shard_threshold`:
-- **Spine** (`project.aimf`): @H + @G + @I + @M with no file content, just architecture keys
-- **Group shards** (`project.G1.aimf`, etc.): @M and @C for that group's resources only
+Feature-gated behind `--features cli`. Uses clap.
 
-The spine is always loaded; group shards are fetched on demand.
+```
+aimf --path ./project --output project.aimf --repo owner/repo --branch main --sessions ~/.claude/projects/myproject/
+```
+
+Flags: `--path`, `--repo`, `--branch`, `--sessions`, `--output`, `--include-dirs`
 
 ## Tauri Desktop App
 
-`main.rs` exposes two IPC commands to the frontend (`src/index.html`):
+Feature-gated behind `--features tauri`. `main.rs` exposes two IPC commands:
 - `compile_project(path, config)` → returns AIMF string
-- `save_to_file(content, path)` → writes .aimf to disk
+- `save_aimf(content, path)` → writes .aimf to disk
 
-The UI is vanilla HTML/CSS/JS with a dark GitHub-style theme.
+The UI is vanilla HTML/CSS/JS with a dark GitHub-style theme (`src/index.html`).
+
+## Deprecated v1 Modules
+
+The following modules exist as stubs for backward compatibility and should not be used:
+- `partitioner/mod.rs` — replaced by curator
+- `hot_strategy/mod.rs` — v2 does not embed content
 
 ## Spec & Design Docs
 
-- `AIMF-v1-SPEC.md` — formal EBNF grammar, token budget estimates, full format reference
-- `startingPoint.md` — design rationale (why not JSON/YAML/Mermaid)
-- `AIMF-High-Level.mermaid` / `AIMF-Detailed.mermaid` — architecture diagrams
-- `aimf-reader/SKILL.md` — Cowork skill documentation for consuming .aimf files
+- `AIMF-v1-SPEC.md` — v2 format specification with EBNF grammar and token budget protocol
+- `startingPoint.md` — original design rationale
+- `AIMF-High-Level.mermaid` / `AIMF-Detailed.mermaid` — architecture diagrams (v1, pending update)
+- `AIMF-Project-Blueprint.docx` — comprehensive project blueprint
+- `FOUNDATION.md` — session log mining techniques (JSONL parsing, mermaid extraction regex)
+- `aimf-reader/SKILL.md` — Cowork skill documentation (three operating modes)
+- `TASK-example.task.md` — example Opus → Sonnet task handoff document
+- `project.aimf` — real AIMF manifest for this project

@@ -5,121 +5,59 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ResourceType {
-    SRC,
-    CFG,
-    DOC,
-    TEST,
-    MRM,
-    BIN,
-    META,
-    OTHER,
+    MRM,   // Mermaid diagram
+    DEC,   // Decision document
+    DIR,   // Source directory (logical unit)
+    CFG,   // Configuration file
+    DOC,   // Documentation
+    SPEC,  // Specification
+    SRC,   // Single source file
+    TASK,  // Task document
 }
 
 impl ResourceType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::SRC => "SRC",
+            Self::MRM => "MRM",
+            Self::DEC => "DEC",
+            Self::DIR => "DIR",
             Self::CFG => "CFG",
             Self::DOC => "DOC",
-            Self::TEST => "TEST",
-            Self::MRM => "MRM",
-            Self::BIN => "BIN",
-            Self::META => "META",
-            Self::OTHER => "OTHER",
+            Self::SPEC => "SPEC",
+            Self::SRC => "SRC",
+            Self::TASK => "TASK",
         }
     }
 }
 
-// ─── Load Strategy ──────────────────────────────────────────────
+// ─── Navigation Entry ───────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum LoadWhen {
-    Always,
-    OnEdit,
-    OnRequest,
-    OnError,
-    OnGroup,
-    Never,
-}
-
-impl LoadWhen {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Always => "always",
-            Self::OnEdit => "on_edit",
-            Self::OnRequest => "on_request",
-            Self::OnError => "on_error",
-            Self::OnGroup => "on_group",
-            Self::Never => "never",
-        }
-    }
-}
-
-// ─── Hot Payload Strategy ───────────────────────────────────────
-
+/// A single entry in the @NAV section — one resource Claude should know about.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum HotStrategy {
-    Full,
-    Summary,
-    Head(usize),      // first N lines
-    Signature,        // function/struct signatures only
-    Delta,            // diff since last compile
-}
-
-// ─── Core Data Structures ───────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Resource {
-    pub id: String,           // F1, F2, ...
+pub struct NavEntry {
+    pub id: String,              // Short, meaningful: ARCH, AUTH, D001
     pub resource_type: ResourceType,
-    pub load_when: LoadWhen,
-    pub path: PathBuf,        // relative to root
-    pub size: u64,
-    pub hash: String,         // 8-char hex
-    pub group_id: String,     // G1, G2, ... or "-"
-    pub hint: String,         // semantic hint, max 60 chars
+    pub path: PathBuf,           // Relative to project root
+    pub about: String,           // One-line description, max 80 chars
+    pub tokens: usize,           // Estimated token cost to load
+    pub load_hints: Vec<String>, // "design", "task:auth", "reference", etc.
 }
 
+// ─── Working Context ────────────────────────────────────────────
+
+/// A key-value pair in the @CTX section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Group {
-    pub id: String,           // G1, G2, ...
-    pub label: String,
-    pub patterns: Vec<String>, // glob patterns
+pub struct CtxEntry {
+    pub key: String,
+    pub value: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HotEntry {
-    pub key: String,          // ResourceID or special key (CTX, ARCH, DEPS, etc.)
-    pub payload: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ColdBlock {
-    pub resource_id: String,
-    pub payload: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Header {
-    pub version: u32,
-    pub resource_count: usize,
-    pub hot_count: usize,
-    pub group_count: usize,
-    pub repo: Option<String>,
-    pub branch: Option<String>,
-    pub commit: Option<String>,
-    pub timestamp: String,
-    pub root: PathBuf,
-    pub shard: Option<String>,
-}
+// ─── AIMF Document ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AimfDocument {
-    pub header: Header,
-    pub groups: Vec<Group>,
-    pub resources: Vec<Resource>,
-    pub hot_entries: Vec<HotEntry>,
-    pub cold_blocks: Vec<ColdBlock>,
+    pub nav: Vec<NavEntry>,
+    pub ctx: Vec<CtxEntry>,
 }
 
 // ─── Compiler Configuration ─────────────────────────────────────
@@ -129,19 +67,10 @@ pub struct CompilerConfig {
     pub root: PathBuf,
     pub repo: Option<String>,
     pub branch: Option<String>,
-    pub max_hot_files: usize,
-    pub max_hot_file_size: u64,      // bytes — files larger than this get summarized
-    pub summary_threshold: u64,      // bytes — files larger than this get head-only
-    pub token_budget: usize,         // max tokens for hot memory section
+    pub session_logs: Option<PathBuf>,  // Optional: path to .claude/projects/ session dir
     pub ignore_patterns: Vec<String>,
-    pub custom_groups: Option<Vec<GroupConfig>>,
-    pub shard_threshold: usize,      // resource count to trigger sharding
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupConfig {
-    pub label: String,
-    pub patterns: Vec<String>,
+    pub include_source_dirs: bool,      // Whether to add DIR entries for source directories
+    pub max_about_len: usize,           // Max length for about field (default 80)
 }
 
 impl Default for CompilerConfig {
@@ -150,23 +79,19 @@ impl Default for CompilerConfig {
             root: PathBuf::from("."),
             repo: None,
             branch: None,
-            max_hot_files: 15,
-            max_hot_file_size: 2048,
-            summary_threshold: 20480,
-            token_budget: 100_000,
+            session_logs: None,
             ignore_patterns: vec![
-                ".git/**".into(),
-                "node_modules/**".into(),
-                "target/**".into(),
-                "__pycache__/**".into(),
-                "*.pyc".into(),
+                ".git".into(),
+                "node_modules".into(),
+                "target".into(),
+                "__pycache__".into(),
                 ".DS_Store".into(),
-                "*.lock".into(),
-                "dist/**".into(),
-                "build/**".into(),
+                "dist".into(),
+                "build".into(),
+                "gen".into(),
             ],
-            custom_groups: None,
-            shard_threshold: 500,
+            include_source_dirs: true,
+            max_about_len: 80,
         }
     }
 }
