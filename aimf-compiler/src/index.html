@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AIMF Compiler</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 16px 24px;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      color: #f0f6fc;
+    }
+    header .tag {
+      font-size: 11px;
+      background: #1f6feb33;
+      color: #58a6ff;
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+    .container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 24px;
+      gap: 16px;
+      overflow: auto;
+    }
+    .input-row {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .field.grow { flex: 1; }
+    label {
+      font-size: 12px;
+      color: #8b949e;
+      font-weight: 500;
+    }
+    input, select {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      outline: none;
+    }
+    input:focus { border-color: #58a6ff; }
+    button {
+      background: #238636;
+      color: #fff;
+      border: none;
+      padding: 8px 20px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:hover { background: #2ea043; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary {
+      background: #21262d;
+      border: 1px solid #30363d;
+    }
+    button.secondary:hover { background: #30363d; }
+    .stats {
+      display: flex;
+      gap: 24px;
+      padding: 12px 16px;
+      background: #161b22;
+      border-radius: 8px;
+      border: 1px solid #30363d;
+    }
+    .stat {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .stat .value {
+      font-size: 24px;
+      font-weight: 600;
+      color: #58a6ff;
+    }
+    .stat .label {
+      font-size: 11px;
+      color: #8b949e;
+      text-transform: uppercase;
+    }
+    .output-area {
+      flex: 1;
+      min-height: 200px;
+    }
+    .output-area textarea {
+      width: 100%;
+      height: 100%;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      color: #7ee787;
+      padding: 12px;
+      border-radius: 8px;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      resize: none;
+      outline: none;
+    }
+    .status {
+      font-size: 12px;
+      color: #8b949e;
+      padding: 8px 0;
+    }
+    .status.error { color: #f85149; }
+    .status.success { color: #7ee787; }
+    .actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AIMF Compiler</h1>
+    <span class="tag">v1.0</span>
+  </header>
+
+  <div class="container">
+    <div class="input-row">
+      <div class="field grow">
+        <label>Project Path</label>
+        <input type="text" id="projectPath" placeholder="/path/to/project or owner/repo">
+      </div>
+      <div class="field">
+        <label>Repo (optional)</label>
+        <input type="text" id="repoName" placeholder="owner/repo">
+      </div>
+      <div class="field">
+        <label>Branch</label>
+        <input type="text" id="branchName" placeholder="main" value="main">
+      </div>
+      <button id="compileBtn" onclick="compile()">Compile</button>
+    </div>
+
+    <div class="stats" id="stats" style="display:none">
+      <div class="stat">
+        <span class="value" id="statFiles">0</span>
+        <span class="label">Resources</span>
+      </div>
+      <div class="stat">
+        <span class="value" id="statHot">0</span>
+        <span class="label">Hot</span>
+      </div>
+      <div class="stat">
+        <span class="value" id="statGroups">0</span>
+        <span class="label">Groups</span>
+      </div>
+      <div class="stat">
+        <span class="value" id="statTokens">—</span>
+        <span class="label">Est. Tokens</span>
+      </div>
+    </div>
+
+    <div class="output-area">
+      <textarea id="output" readonly placeholder="AIMF output will appear here..."></textarea>
+    </div>
+
+    <div id="statusLine" class="status"></div>
+
+    <div class="actions">
+      <button class="secondary" onclick="copyToClipboard()">Copy</button>
+      <button class="secondary" onclick="saveFile()">Save .aimf</button>
+    </div>
+  </div>
+
+  <script>
+    const { invoke } = window.__TAURI__.core;
+
+    async function compile() {
+      const path = document.getElementById('projectPath').value.trim();
+      if (!path) { setStatus('Enter a project path', 'error'); return; }
+
+      const repo = document.getElementById('repoName').value.trim() || null;
+      const branch = document.getElementById('branchName').value.trim() || null;
+      const btn = document.getElementById('compileBtn');
+
+      btn.disabled = true;
+      btn.textContent = 'Compiling...';
+      setStatus('Scanning project...', '');
+
+      try {
+        const result = await invoke('compile_project', { path, repo, branch });
+
+        document.getElementById('output').value = result.aimf;
+        document.getElementById('statFiles').textContent = result.total_files;
+        document.getElementById('statHot').textContent = result.hot_count;
+        document.getElementById('statGroups').textContent = result.group_count;
+        document.getElementById('statTokens').textContent = estimateTokens(result.aimf);
+        document.getElementById('stats').style.display = 'flex';
+
+        setStatus(`Compiled ${result.total_files} resources (${result.hot_count} hot)`, 'success');
+      } catch (e) {
+        setStatus(`Error: ${e}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Compile';
+      }
+    }
+
+    function estimateTokens(text) {
+      // Rough estimate: ~4 chars per token for code
+      return Math.round(text.length / 4).toLocaleString();
+    }
+
+    async function saveFile() {
+      const content = document.getElementById('output').value;
+      if (!content) return;
+
+      try {
+        const { save } = window.__TAURI__.dialog;
+        const path = await save({
+          defaultPath: 'project.aimf',
+          filters: [{ name: 'AIMF', extensions: ['aimf'] }]
+        });
+        if (path) {
+          await invoke('save_aimf', { path, content });
+          setStatus(`Saved to ${path}`, 'success');
+        }
+      } catch (e) {
+        setStatus(`Save failed: ${e}`, 'error');
+      }
+    }
+
+    function copyToClipboard() {
+      const text = document.getElementById('output').value;
+      navigator.clipboard.writeText(text);
+      setStatus('Copied to clipboard', 'success');
+    }
+
+    function setStatus(msg, type) {
+      const el = document.getElementById('statusLine');
+      el.textContent = msg;
+      el.className = 'status ' + (type || '');
+    }
+
+    // Allow Enter to trigger compile
+    document.getElementById('projectPath').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') compile();
+    });
+  </script>
+</body>
+</html>

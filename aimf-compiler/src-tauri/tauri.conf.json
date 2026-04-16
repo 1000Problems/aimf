@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegui/nicegui/main/nicegui/client/tauri.conf.schema.json",
+  "productName": "AIMF Compiler",
+  "version": "0.1.0",
+  "identifier": "com.aimf.compiler",
+  "build": {
+    "frontendDist": "../src",
+    "devUrl": "http://localhost:1420"
+  },
+  "app": {
+    "title": "AIMF Compiler",
+    "windows": [
+      {
+        "title": "AIMF Compiler",
+        "width": 900,
+        "height": 700,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "dialog": {},
+    "fs": {
+      "scope": ["**"]
+    }
+  }
+}

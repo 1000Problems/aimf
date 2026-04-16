@@ -1,0 +1,38 @@
+[package]
+name = "aimf-compiler"
+version = "0.1.0"
+edition = "2021"
+description = "Compile GitHub projects into AIMF (AI Minimal Format) documents"
+license = "MIT"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+sha2 = "0.10"
+hex = "0.4"
+glob = "0.3"
+chrono = "0.4"
+rayon = "1.10"
+clap = { version = "4", features = ["derive"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+[features]
+default = ["tauri"]
+cli = ["clap", "tokio"]
+tauri = []
+
+[[bin]]
+name = "aimf-compiler"
+path = "src/main.rs"
+
+[[bin]]
+name = "aimf-cli"
+path = "src/cli.rs"
+required-features = ["cli"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

@@ -1,0 +1,51 @@
+---
+title: AIMF System — High-Level Architecture
+---
+graph LR
+    subgraph Input
+        REPO["GitHub Project<br/>(Local Clone)"]
+    end
+
+    subgraph Compiler["aimf-compiler (Tauri/Rust)"]
+        direction TB
+        SCAN["Scan"] --> CLASSIFY["Classify"]
+        CLASSIFY --> PARTITION["Partition"]
+        PARTITION --> EMIT["Emit"]
+    end
+
+    subgraph Output["AIMF Document (.aimf)"]
+        direction TB
+        H["@H Header"]
+        G["@G Groups"]
+        I["@I Index"]
+        M["@M Hot Memory"]
+        C["@C Cold Blocks"]
+        H --> G --> I --> M --> C
+    end
+
+    subgraph Skill["aimf-reader (Cowork Skill)"]
+        direction TB
+        PARSE["Parse AIMF"]
+        ORIENT["Orient<br/>(Hot Memory)"]
+        NAV["Navigate<br/>(Index Search)"]
+        LOAD["Load<br/>(Working Folder)"]
+        PARSE --> ORIENT --> NAV --> LOAD
+    end
+
+    subgraph Context["LLM Context Window"]
+        HOT["Hot Context<br/>(always loaded)"]
+        COLD["On-Demand<br/>(loaded when needed)"]
+    end
+
+    REPO --> SCAN
+    EMIT --> H
+    Output --> PARSE
+    ORIENT --> HOT
+    LOAD --> COLD
+    LOAD -.->|"reads files"| REPO
+
+    style Input fill:#f0f4f8,stroke:#2e5090,color:#1a1a2e
+    style Compiler fill:#e8f0fe,stroke:#2e5090,color:#1a1a2e
+    style Output fill:#f0fdf4,stroke:#2d8b4e,color:#1a1a2e
+    style Skill fill:#fef3c7,stroke:#d97706,color:#1a1a2e
+    style Context fill:#fce7f3,stroke:#be185d,color:#1a1a2e
